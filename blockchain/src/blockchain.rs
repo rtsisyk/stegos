@@ -59,9 +59,9 @@ pub type ValidatorId = u32;
 /// Saved information about validator, and its slotcount in epoch.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ValidatorKeyInfo {
-    pub(crate) network_pkey: pbc::PublicKey,
-    pub(crate) account_pkey: scc::PublicKey,
-    pub(crate) slots: i64,
+    pub network_pkey: pbc::PublicKey,
+    pub account_pkey: scc::PublicKey,
+    pub slots: i64,
 }
 
 /// Information about service award payout.
@@ -85,6 +85,14 @@ pub struct EpochInfo {
     pub validators: Vec<ValidatorKeyInfo>,
     pub facilitator: pbc::PublicKey,
     pub awards: AwardsInfo,
+}
+
+/// Retrospective information for some epoch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LightEpochInfo {
+    pub header: MacroBlockHeader,
+    pub validators: StakersGroup,
+    pub facilitator: pbc::PublicKey,
 }
 
 /// Information of current chain, that is used as proof of viewchange.
@@ -2121,7 +2129,7 @@ impl Blockchain {
     }
 
     /// Undolog is actualy a patchset, so just apply it to the block.
-    fn write_log<K, V>(
+    pub fn write_log<K, V>(
         batch: &mut WriteBatch,
         cf: &ColumnFamily,
         diff: BTreeMap<K, Option<V>>,
