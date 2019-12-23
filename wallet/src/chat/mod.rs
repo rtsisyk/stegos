@@ -46,26 +46,34 @@ use stegos_serialization::traits::ProtoConvert;
 // ----------------------------------------------------------------------------------
 
 /*
+
 macro_rules! sdebug {
     ($self:expr, $fmt:expr $(,$arg:expr)*) => (
-        log!(Level::Debug, concat!("[{}] ({}) ", $fmt), $self.account_pkey, $self.state.name(), $($arg),*);
+        log!(Level::Debug, concat!("[{}] ({}) ", $fmt), $self.chat_pkey, $self.state.name(), $($arg),*);
     );
 }
 macro_rules! sinfo {
     ($self:expr, $fmt:expr $(,$arg:expr)*) => (
-        log!(Level::Info, concat!("[{}] ({}) ", $fmt), $self.account_pkey, $self.state.name(), $($arg),*);
+        log!(Level::Info, concat!("[{}] ({}) ", $fmt), $self.chat_pkey, $self.state.name(), $($arg),*);
     );
 }
 */
+
+macro_rules! strace {
+    ($self:expr, $fmt:expr $(,$arg:expr)*) => (
+        log!(Level::Trace, concat!("[{}] ({}) ", $fmt), $self.chat_pkey, $self.state.name(), $($arg),*);
+    );
+}
+
 macro_rules! swarn {
     ($self:expr, $fmt:expr $(,$arg:expr)*) => (
-        log!(Level::Warn, concat!("[{}] ({}) ", $fmt), $self.account_pkey, $self.state.name(), $($arg),*);
+        log!(Level::Warn, concat!("[{}] ({}) ", $fmt), $self.chat_pkey, $self.state.name(), $($arg),*);
     );
 }
 
 macro_rules! serror {
     ($self:expr, $fmt:expr $(,$arg:expr)*) => (
-        log!(Level::Error, concat!("[{}] ({}) ", $fmt), $self.account_pkey, $self.state.name(), $($arg),*);
+        log!(Level::Error, concat!("[{}] ({}) ", $fmt), $self.chat_pkey, $self.state.name(), $($arg),*);
     );
 }
 
@@ -80,6 +88,12 @@ pub struct GroupMember {
 
 #[derive(Clone)]
 pub struct MemberRoster(Vec<GroupMember>);
+
+impl From<Vec<GroupMember>> for MemberRoster {
+    fn from(d: Vec<GroupMember>) -> MemberRoster {
+        MemberRoster(d)
+    }
+}
 
 #[derive(Clone)]
 pub struct GroupOwnerInfo {
@@ -149,13 +163,14 @@ pub struct ChannelSession {
     pub messages: Vec<(PublicKey, Vec<u8>)>,
 }
 
-#[derive(Clone)]
-pub enum ChatMessage {
+#[derive(Clone, Debug)]
+pub enum ChatItem {
     // represents the output of get_message()
-    None,
     Rekeying(Vec<ChatMessageOutput>),
     Text((PublicKey, Vec<u8>)),
 }
+
+type ChatMessage = Option<ChatItem>;
 
 impl MemberRoster {
     pub fn evict(&mut self, evicted_members: &Vec<PublicKey>) {
@@ -439,7 +454,7 @@ impl ChannelOwnerInfo {
                 "Channel Owner received Channel message from non-owner"
             );
         }
-        ChatMessage::None
+        None
     }
 
     fn new_message(&self, msg: Vec<u8>) -> ChatMessageOutput {
@@ -579,29 +594,29 @@ impl GroupOwnerInfo {
             &self.owner_chain,
             utxo,
         ) {
-            None => ChatMessage::None,
+            None => None,
             Some((sender, msg)) => {
                 // All chat messages belong to me...
                 self.record_utxo(chat, utxo, owner_chain, sender);
                 if sender == self.owner_pkey {
                     // was my own message
-                    ChatMessage::None
+                    None
                 } else {
                     match msg {
                         IncomingChatPayload::Evictions(_) => {
                             // should never happend since only I can produce them
-                            ChatMessage::None
+                            None
                         }
                         IncomingChatPayload::Rekeying(chain) => {
                             // rekeying was already handled by side effect of get_decrypted_message
-                            ChatMessage::None
+                            None
                         }
                         IncomingChatPayload::NewMembers(_) => {
                             // only I ever send these messages, when legitimate.
                             // if someone else sent one of these, just ignore it.
-                            ChatMessage::None
+                            None
                         }
-                        IncomingChatPayload::PlainText(m) => ChatMessage::Text((sender, m)),
+                        IncomingChatPayload::PlainText(m) => ChatItem::Text((sender, m)).into(),
                     }
                 }
             }
@@ -748,35 +763,35 @@ impl ChatSession {
             &self.my_chain,
             utxo,
         ) {
-            None => ChatMessage::None,
+            None => None,
             Some((sender, msg)) => {
                 if sender == self.my_pkey {
                     // ignore my own messages
-                    ChatMessage::None
+                    None
                 } else {
                     match msg {
                         IncomingChatPayload::Evictions(evicted_members) => {
                             if sender == self.owner_pkey {
                                 // form and send a transaction with rekeying messages0
                                 let rekeying_msgs = self.evict_members(&evicted_members);
-                                ChatMessage::Rekeying(rekeying_msgs)
+                                ChatItem::Rekeying(rekeying_msgs).into()
                             } else {
                                 // someone is trying to spoof us - just ignore them
-                                ChatMessage::None
+                                None
                             }
                         }
                         IncomingChatPayload::Rekeying(_) => {
                             // already handled
-                            ChatMessage::None
+                            None
                         }
                         IncomingChatPayload::NewMembers(vec) => {
                             if sender == self.owner_pkey {
                                 // just ignore if from anyone other than group owner
                                 self.members.add_members_to_roster(&vec, utxo.created);
                             }
-                            ChatMessage::None
+                            None
                         }
-                        IncomingChatPayload::PlainText(m) => ChatMessage::Text((sender, m)),
+                        IncomingChatPayload::PlainText(m) => ChatItem::Text((sender, m)).into(),
                     }
                 }
             }
@@ -808,11 +823,11 @@ impl ChannelSession {
         match &utxo.payload {
             MessagePayload::EncryptedChainCodes(_) => {
                 // ignore these - they shouldn't exist in Channels
-                ChatMessage::None
+                None
             }
             MessagePayload::EncryptedMessage(m) => match self.decrypt_channel_message(utxo, m) {
-                None => ChatMessage::None,
-                Some(txt) => ChatMessage::Text((self.owner_pkey.clone(), txt)),
+                None => None,
+                Some(txt) => ChatItem::Text((self.owner_pkey.clone(), txt)).into(),
             },
         }
     }
@@ -879,6 +894,25 @@ impl ChatState {
     }
 }
 
+pub enum Event {
+    //  fn notify_wallet_of_new_incomning_message(&self, sender: PublicKey, msg: Vec<u8>) {
+    //     // GUI Alert
+    //     // unimplemented!();
+    // }
+
+    // fn notify_wallet_to_send_transaction(&self, msgs: Vec<ChatMessageOutput>) {
+    IncommingMessage {
+        //group:String?
+        sender: PublicKey,
+        msg: Vec<u8>,
+    },
+    SendTransaction {
+        //group:String?
+        sender: PublicKey,
+        msg: Vec<u8>,
+    },
+}
+
 #[derive(Clone)]
 pub struct UtxoInfo {
     pub id: Hash,
@@ -887,12 +921,6 @@ pub struct UtxoInfo {
 }
 
 pub struct Chat {
-    // Public key being used wallet transactions
-    account_pkey: PublicKey,
-
-    // Secret key for wallet transactions
-    account_skey: SecretKey,
-
     // Public key being used for Chat purposes
     chat_pkey: PublicKey,
 
@@ -928,13 +956,7 @@ impl Chat {
     // GUI Alert - somebody needs to call this to set things up
     // We probably need functions here to save/restore state info to
     // startup database.
-    pub fn new(
-        account_skey: SecretKey,
-        account_pkey: PublicKey,
-        chat_skey: SecretKey,
-        chat_pkey: PublicKey,
-        network: Network,
-    ) -> Chat {
+    pub fn new(chat_skey: SecretKey, chat_pkey: PublicKey, network: Network) -> Chat {
         let mut events: Vec<Box<dyn Stream<Item = ChatEvent, Error = ()> + Send>> = Vec::new();
         // Network.
         let groups_joined = network
@@ -946,8 +968,6 @@ impl Chat {
         let events = select_all(events);
 
         let chat_info = Chat {
-            account_pkey,
-            account_skey,
             chat_skey,
             chat_pkey,
             owned_groups: Vec::new(),
@@ -1119,7 +1139,7 @@ impl Chat {
     }
 
     pub fn new_message(
-        &mut self,
+        &self,
         group_name: String,
         message: Vec<u8>,
     ) -> Result<ChatMessageOutput, ChatError> {
@@ -1142,7 +1162,7 @@ impl Chat {
 
     fn notify_wallet_of_new_incomning_message(&self, sender: PublicKey, msg: Vec<u8>) {
         // GUI Alert
-        unimplemented!();
+        // unimplemented!();
     }
 
     fn notify_wallet_to_send_transaction(&self, msgs: Vec<ChatMessageOutput>) {
@@ -1150,7 +1170,7 @@ impl Chat {
         // more rekeying messages for others in the group
 
         // GUI Alert
-        unimplemented!();
+        // unimplemented!();
     }
 
     fn process_owned_group_message(
@@ -1158,7 +1178,7 @@ impl Chat {
         info: &mut GroupOwnerInfo,
         msg: &ChatMessageOutput,
         owner_chain: &Hash,
-    ) {
+    ) -> ChatMessage {
         // Here is where incoming messages for Groups are being decrypted and handed
         // back with the public key of the sender. Rekeying messages are handled
         // internally here, and a result of None is produced for their final output.
@@ -1166,13 +1186,12 @@ impl Chat {
         // A Group Owner is no different from any other group members as far as
         // receiving incoming group messages.
         self.state = ChatState::HandlingOwnedChatGroup;
-        match info.get_message(self, msg, owner_chain) {
-            ChatMessage::None => {}
-            ChatMessage::Rekeying(_rekeying_msgs) => {
+        match info.get_message(self, msg, owner_chain)? {
+            ChatItem::Rekeying(_rekeying_msgs) => {
                 // This should not happen if I own the group...
                 unreachable!();
             }
-            ChatMessage::Text((sender, txt)) => {
+            ChatItem::Text((sender, txt)) => {
                 // Filter for senders that I want to ignore
                 // archive and/or display the message for those that I want
                 if sender != info.owner_pkey
@@ -1183,6 +1202,7 @@ impl Chat {
                 }
             }
         }
+        unimplemented!()
     }
 
     fn process_subscribed_group_message(
@@ -1190,47 +1210,46 @@ impl Chat {
         info: &mut ChatSession,
         msg: &ChatMessageOutput,
         owner_chain: &Hash,
-    ) {
+    ) -> ChatMessage {
         // Here is where incoming messages for Groups are being decrypted and handed
         // back with the public key of the sender. Rekeying messages are handled
         // internally here, and a result of None is produced for their final output.
         self.state = ChatState::HandlingSubscribedChatGroup;
-        match info.get_message(self, msg, owner_chain) {
-            ChatMessage::None => {}
-            ChatMessage::Rekeying(rekeying_msgs) => {
+        match info.get_message(self, msg, owner_chain)? {
+            ChatItem::Rekeying(array) => {
                 // This should not happen if I own the group...
-                self.notify_wallet_to_send_transaction(rekeying_msgs);
+                return ChatItem::Rekeying(array).into();
             }
-            ChatMessage::Text((sender, txt)) => {
+            ChatItem::Text((sender, txt)) => {
                 // Filter for senders that I want to ignore
                 // archive and/or display the message for those that I want
                 if None == info.ignored_members.iter().find(|&&p| p == sender) {
                     info.messages.push((sender, txt.clone()));
-                    self.notify_wallet_of_new_incomning_message(sender, txt);
+                    return ChatItem::Text((sender, txt)).into();
                 }
             }
         }
+        None
     }
 
     fn process_subscribed_channel_message(
         &mut self,
         info: &mut ChannelSession,
         msg: &ChatMessageOutput,
-    ) {
+    ) -> ChatMessage {
         // Here is where incoming messages for Channels are being
         // decrypted and handed back.
         self.state = ChatState::HandlingSubscribedChannel;
-        match info.get_message(self, msg) {
-            ChatMessage::None => {}
-            ChatMessage::Rekeying(_vec) => {
+        match info.get_message(self, msg)? {
+            ChatItem::Rekeying(_vec) => {
                 // should never get any rekeying or member evictions on Channels
                 unreachable!();
             }
-            ChatMessage::Text((sender, txt)) => {
+            ChatItem::Text((sender, txt)) => {
                 // Filter for senders that I want to ignore
                 // archive and/or display the message for those that I want
                 info.messages.push((sender, txt.clone()));
-                self.notify_wallet_of_new_incomning_message(sender, txt);
+                return ChatItem::Text((sender, txt)).into();
             }
         }
     }
@@ -1239,18 +1258,21 @@ impl Chat {
         &mut self,
         info: &ChannelOwnerInfo,
         utxo: &ChatMessageOutput,
-    ) {
+    ) -> ChatMessage {
         self.state = ChatState::HandlingOwnedChannel;
-        match info.get_message(self, utxo) {
-            // side effect of get_message is to record utxo as one of
-            // my spendable Chat UTXO
-            ChatMessage::None => {}
-            ChatMessage::Rekeying(_) => unreachable!(),
-            ChatMessage::Text(_) => unreachable!(),
+
+        // side effect of get_message is to record utxo as one of
+        // my spendable Chat UTXO
+        match info.get_message(self, utxo)? {
+            ChatItem::Rekeying(_) => unreachable!(),
+            ChatItem::Text(_) => unreachable!(),
         }
     }
 
-    fn on_message_received(&mut self, msg: &ChatMessageOutput) {
+    // Returns Ok, if message was for us.
+    // Return Err, if error was not for us.
+    #[must_use]
+    fn on_message_received(&mut self, msg: &ChatMessageOutput) -> Result<ChatMessage, ()> {
         let owner_pt = Pt::from(msg.recipient);
         let owner_hint = msg.recipient_keying_hint;
         let mut owner_chain = Hash::zero();
@@ -1261,8 +1283,9 @@ impl Chat {
             owner_pt == Fr::from(owner_chain) * owner_hint
         }) {
             let mut info = self.owned_groups.remove(pos);
-            self.process_owned_group_message(&mut info, msg, &owner_chain);
+            let event = self.process_owned_group_message(&mut info, msg, &owner_chain);
             self.owned_groups.push(info);
+            return Ok(event);
 
         // Look for incoming messages on subscribed groups.
         // Rekeying messages will arrive on rekeying chain code.
@@ -1271,8 +1294,9 @@ impl Chat {
             owner_pt == Fr::from(owner_chain) * owner_hint
         }) {
             let mut info = self.subscribed_groups.remove(pos);
-            self.process_subscribed_group_message(&mut info, msg, &owner_chain);
+            let event = self.process_subscribed_group_message(&mut info, msg, &owner_chain);
             self.subscribed_groups.push(info);
+            return Ok(event);
 
         // look for incoming messages on subscribed channels
         } else if let Some(pos) = self
@@ -1281,8 +1305,9 @@ impl Chat {
             .position(|g| owner_pt == Fr::from(g.owner_chain) * owner_hint)
         {
             let mut info = self.subscribed_channels.remove(pos);
-            self.process_subscribed_channel_message(&mut info, msg);
+            let event = self.process_subscribed_channel_message(&mut info, msg);
             self.subscribed_channels.push(info);
+            return Ok(event);
 
         // look for incoming messages on owned channels
         // (can only come from owner, sent to owner)
@@ -1294,9 +1319,11 @@ impl Chat {
             // getting back one of my own channel messages
             // record it as a spendable UTXO
             let info = self.owned_channels.remove(pos);
-            self.process_owned_channel_messages(&info, msg);
+            let event = self.process_owned_channel_messages(&info, msg);
             self.owned_channels.push(info);
+            return Ok(event);
         }
+        Err(())
     }
 }
 
@@ -1317,7 +1344,9 @@ impl Future for Chat {
                                 continue;
                             }
                         };
-                        self.on_message_received(&msg);
+                        if let Ok(_) = self.on_message_received(&msg) {
+                            strace!(self, "Found message that belong to us.")
+                        }
                     }
                 },
                 Async::Ready(None) => return Ok(Async::Ready(None)), // Shutdown.
@@ -1328,57 +1357,239 @@ impl Future for Chat {
 }
 
 // -------------------------------------------------------------------
-/*
-Pseudo code for wallet interactions:
+#[cfg(test)]
+mod test {
+    use super::*;
 
-Session Start:
---------------
-Call chat::new() with keying information, initial groups/channels owned
-by wallet, groups subscribed to, channels subscribed to.
+    // Session Start:
+    // --------------
+    // Call chat::new() with keying information, initial groups/channels owned
+    // by wallet, groups subscribed to, channels subscribed to.
 
-Create a Group:
----------------
-call chat::add_owned_group() GroupOwnerInfo to describe the new group.
+    #[test]
+    fn start_session() {
+        stegos_node::test::futures_testing::start_test(|timer| {
+            let (loopback, network, _, _) = stegos_network::loopback::Loopback::new();
+            let (chat_skey, chat_pkey) = stegos_crypto::scc::make_random_keys();
 
-Send out invitations to prospective group members. Invitation tells prospective
-member what group owner pkey and chain code to use. Invitation sent to members chosen
-chat pkey. These are private messages sent by way of PaymentUTXO with encrypted message
-in their payload.
+            let session = Chat::new(chat_skey, chat_pkey, network);
+            // TODO: add asserts.
+        });
+    }
 
-Create a Channel:
------------------
-call chat::add_owned_channel() with ChannelOwnerInfo to describe new channel.
+    // Create a Group:
+    // ---------------
+    // call chat::add_owned_group() GroupOwnerInfo to describe the new group.
 
-No need to deal with membership lists. This is an encrypted broadcast channel
-for the owner, for him to post messages whenever he feels like it.
+    // Send out invitations to prospective group members. Invitation tells prospective
+    // member what group owner pkey and chain code to use. Invitation sent to members chosen
+    // chat pkey. These are private messages sent by way of PaymentUTXO with encrypted message
+    // in their payload.
 
-Add an Ignore of Member to Chat Group:
---------------------------------------
-Call add_ignored_member() with member pkey, identifying the group with its
-identity string.
+    // Subscribe to a Group:
+    // ---------------------
+    // Call add_subscribed_group() with ChatSession struct describing the group and the
+    // user's keying.
 
-Remove a member from ignored list:
-----------------------------------
-Call remove_ignored_member() with member pkey, identifying the group with its
-identity string.
+    // Keying need not be the same as indicated when new Chat struct was formed.
+    // Every group can use different keying if desired. Whatever keying is chosen,
+    // the wallet needs to watch for private messages = Payment UTXO in that keying.
 
-Subscribe to a Group:
----------------------
-Call add_subscribed_group() with ChatSession struct describing the group and the
-user's keying.
+    #[test]
+    fn group() {
+        stegos_node::test::futures_testing::start_test(|timer| {
+            const N: usize = 3;
+            let group_id: String = String::from("GROUP_ID");
+            let epoch = Timestamp::now();
 
-Keying need not be the same as indicated when new Chat struct was formed.
-Every group can use different keying if desired. Whatever keying is chosen,
-the wallet needs to watch for private messages = Payment UTXO in that keying.
+            let (loopback, network, _, _) = stegos_network::loopback::Loopback::new();
 
-Subscribe to a Channel:
------------------------
-call add_subscribed_channel () with ChannelSession struct filled in with
-identifying information.
+            let (owner_skey, owner_pkey) = stegos_crypto::scc::make_random_keys();
+            let initial_owner_chain = Hash::digest(&owner_pkey);
+            let (_owner_c, owner_chain) = new_chain_code(&owner_pkey, &initial_owner_chain);
+            let (_owner_c, rekeying_chain) = new_chain_code(&owner_pkey, &owner_chain);
 
-Send a Message to a Group/Channel:
--------------------------
-call new_messge() with group identification string, and plaintext of message -
-receive back a ChatMsgOutput UTXO. Only Channel Owner can send messages to channels.
+            let members: Vec<_> = (0..N)
+                .map(|_| stegos_crypto::scc::make_random_keys())
+                .collect();
 
-*/
+            let mut session = Chat::new(owner_skey, owner_pkey, network.box_clone());
+
+            // invite all members except first
+            let group_members: Vec<_> = members
+                .iter()
+                .skip(1)
+                .map(|(_, pkey)| GroupMember {
+                    pkey: *pkey,
+                    chain: owner_chain.clone(),
+                    epoch,
+                })
+                .collect();
+
+            let group = GroupOwnerInfo {
+                group_id: group_id.clone(),
+                owner_pkey,
+                owner_skey,
+                owner_chain: owner_chain.clone(), // TODO: Chain code replace
+                owner_rekeying_chain: rekeying_chain.clone(),
+                members: group_members.clone().into(),
+                ignored_members: vec![],
+                messages: vec![],
+            };
+            session.add_owned_group(group).unwrap();
+
+            // Subscribe from member side on group updates.
+            let mut members_sessions: Vec<_> = members
+                .into_iter()
+                .map(|(my_skey, my_pkey)| {
+                    let (_, my_chain) = new_chain_code(&my_pkey, &owner_chain);
+                    let session = ChatSession {
+                        group_id: group_id.clone(),
+                        owner_pkey,
+                        owner_chain: owner_chain.clone(),
+                        owner_rekeying_chain: rekeying_chain.clone(),
+                        my_pkey,
+                        my_skey,
+                        my_chain,
+                        members: group_members.clone().into(),
+                        ignored_members: vec![],
+                        messages: vec![],
+                    };
+                    let mut chat = Chat::new(my_skey, my_pkey, network.box_clone());
+                    chat.add_subscribed_group(session).unwrap();
+                    chat
+                })
+                .collect();
+            let output = session
+                .new_message(group_id.clone(), vec![0u8, 1, 2, 3])
+                .unwrap();
+
+            let mut member_outputs: Vec<_> = members_sessions
+                .iter()
+                .map(|chat| {
+                    chat.new_message(group_id.clone(), vec![0u8, 1, 2, 3])
+                        .unwrap()
+                })
+                .collect();
+
+            // User that not belong to group, should failed to process messages.
+            let members = members_sessions.iter_mut();
+            // let first = members.next().unwrap();
+            // println!("{:?}", first.on_message_received(&output).unwrap());
+            // assert!(first.on_message_received(&output).unwrap().is_none());
+            for member_chat in members {
+                let result = member_chat.on_message_received(&output).unwrap();
+                println!("{:?}", result);
+                // TODO: assert message valid.
+            }
+
+            let member_outputs = member_outputs.iter_mut();
+
+            // // invalid outputs should not be processed.
+            // let invalid = member_outputs.next().unwrap();
+            // assert!(session.on_message_received(&invalid).unwrap().is_none());
+
+            for member_output in member_outputs {
+                let result = session.on_message_received(&member_output).unwrap();
+                println!("{:?}", result);
+                // TODO: assert message valid.
+            }
+            //TODO Assert sender, receiver.
+        });
+        panic!();
+    }
+
+    // Create a Channel:
+    // -----------------
+    // call chat::add_owned_channel() with ChannelOwnerInfo to describe new channel.
+
+    // No need to deal with membership lists. This is an encrypted broadcast channel
+    // for the owner, for him to post messages whenever he feels like it.
+
+    // Subscribe to a Channel:
+    // -----------------------
+    // call add_subscribed_channel () with ChannelSession struct filled in with
+    // identifying information.
+
+    #[test]
+    fn channel() {
+        stegos_node::test::futures_testing::start_test(|timer| {
+            const N: usize = 3;
+            let channel_id: String = String::from("CHANNEL_ID");
+            let epoch = Timestamp::now();
+
+            let (loopback, network, _, _) = stegos_network::loopback::Loopback::new();
+            let (my_skey, my_pkey) = stegos_crypto::scc::make_random_keys();
+            let (owner_skey, owner_pkey) = stegos_crypto::scc::make_random_keys();
+            let (chat_skey, chat_pkey) = stegos_crypto::scc::make_random_keys();
+
+            let initial_owner_chain = Hash::digest(&owner_pkey);
+            let (_owner_c, owner_chain) = new_chain_code(&owner_pkey, &initial_owner_chain);
+            let (_owner_c, rekeying_chain) = new_chain_code(&owner_pkey, &owner_chain);
+
+            let members: Vec<_> = (0..N)
+                .map(|_| stegos_crypto::scc::make_random_keys())
+                .collect();
+
+            let mut session = Chat::new(chat_skey, chat_pkey, network.box_clone());
+
+            let channel = ChannelOwnerInfo {
+                channel_id: channel_id.clone(),
+                owner_pkey,
+                owner_skey,
+                owner_chain: owner_chain.clone(), // TODO: Chain code replace
+            };
+            session.add_owned_channel(channel).unwrap();
+
+            let mut members_sessions: Vec<_> = members
+                .into_iter()
+                .map(|(my_skey, my_pkey)| {
+                    let (_, my_chain) = new_chain_code(&my_pkey, &owner_chain);
+                    let session = ChannelSession {
+                        channel_id: channel_id.clone(),
+                        owner_pkey,
+                        owner_chain: owner_chain.clone(),
+                        messages: vec![],
+                    };
+                    let mut chat = Chat::new(my_skey, my_pkey, network.box_clone());
+                    chat.add_subscribed_channel(session).unwrap();
+                    chat
+                })
+                .collect();
+            let output = session
+                .new_message(channel_id.clone(), vec![0u8, 1, 2, 3])
+                .unwrap();
+
+            // User that not belong to group, should failed to process messages.
+            let members = members_sessions.iter_mut();
+            // let first = members.next().unwrap();
+            // println!("{:?}", first.on_message_received(&output).unwrap());
+            // assert!(first.on_message_received(&output).unwrap().is_none());
+            for member_chat in members {
+                let result = member_chat.on_message_received(&output).unwrap().unwrap();
+                let result = if let ChatItem::Text((_, result)) = result {
+                    result
+                } else {
+                    unreachable!()
+                };
+                assert_eq!(&result[0..4], &[0u8, 1, 2, 3]);
+                // TODO: assert message valid.
+            }
+        });
+    }
+
+    // Add an Ignore of Member to Chat Group:
+    // --------------------------------------
+    // Call add_ignored_member() with member pkey, identifying the group with its
+    // identity string.
+
+    // Remove a member from ignored list:
+    // ----------------------------------
+    // Call remove_ignored_member() with member pkey, identifying the group with its
+    // identity string.
+
+    // Send a Message to a Group/Channel:
+    // -------------------------
+    // call new_message() with group identification string, and plaintext of message -
+    // receive back a ChatMsgOutput UTXO. Only Channel Owner can send messages to channels.
+}
