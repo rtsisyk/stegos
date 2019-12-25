@@ -119,6 +119,13 @@ pub struct AccountRecovery {
     pub recovery: String,
 }
 
+/// Notification about synchronization status.
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct AccountStatusInfo {
+    pub epoch: u64,
+    pub offset: u32,
+}
+
 ///
 /// Out-of-band notifications.
 ///
@@ -126,6 +133,7 @@ pub struct AccountRecovery {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum AccountNotification {
+    StatusChanged(AccountStatusInfo),
     BalanceChanged(AccountBalance),
     SnowballStatus(SnowballStatus),
     TransactionStatus {
@@ -293,6 +301,10 @@ pub enum AccountResponse {
 pub struct AccountInfo {
     pub account_pkey: scc::PublicKey,
     pub network_pkey: pbc::PublicKey,
+    #[serde(default)]
+    pub epoch: u64,
+    #[serde(default)]
+    pub offset: u32,
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]

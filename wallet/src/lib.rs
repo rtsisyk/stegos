@@ -215,7 +215,7 @@ impl UnsealedAccountService {
         let chain_notifications = ChainSubscription::new(&node, epoch, 0);
 
         info!("Loaded account {}", account_pkey);
-        UnsealedAccountService {
+        let mut service = UnsealedAccountService {
             database_dir,
             account_dir,
             account_skey,
@@ -232,7 +232,9 @@ impl UnsealedAccountService {
             subscribers,
             events,
             chain_notifications,
-        }
+        };
+        service.notify_status();
+        service
     }
 
     /// Send money.
@@ -683,6 +685,7 @@ impl UnsealedAccountService {
             &self.account_skey,
         )?;
 
+        self.notify_status();
         self.on_tx_statuses_changed(&transaction_statuses);
         if transaction_statuses.len() > 0 {
             self.notify_balance_changed(self.database.balance());
@@ -692,6 +695,7 @@ impl UnsealedAccountService {
 
     fn revert_light_micro_block(&mut self) -> Result<(), Error> {
         let transaction_statuses = self.database.revert_micro_block()?;
+        self.notify_status();
         self.on_tx_statuses_changed(&transaction_statuses);
         if transaction_statuses.len() > 0 {
             self.notify_balance_changed(self.database.balance());
@@ -747,6 +751,7 @@ impl UnsealedAccountService {
         if let Some((ref mut snowball, _)) = &mut self.snowball {
             snowball.change_facilitator(self.database.facilitator_pkey().clone());
         }
+        self.notify_status();
         self.on_tx_statuses_changed(&transaction_statuses);
         if transaction_statuses.len() > 0 {
             self.notify_balance_changed(self.database.balance());
@@ -939,6 +944,14 @@ impl UnsealedAccountService {
         self.notify(AccountNotification::BalanceChanged(balance));
     }
 
+    fn notify_status(&mut self) {
+        let status = AccountStatusInfo {
+            epoch: self.database.epoch(),
+            offset: self.database.offset(),
+        };
+        self.notify(AccountNotification::StatusChanged(status));
+    }
+
     fn notify(&mut self, notification: AccountNotification) {
         trace!("Created notification = {:?}", notification);
         self.subscribers
@@ -1114,6 +1127,8 @@ impl Future for UnsealedAccountService {
                                 let account_info = AccountInfo {
                                     account_pkey: self.account_pkey.clone(),
                                     network_pkey: self.network_pkey.clone(),
+                                    epoch: self.database.epoch(),
+                                    offset: self.database.offset(),
                                 };
                                 AccountResponse::AccountInfo(account_info)
                             }
@@ -1350,6 +1365,8 @@ impl Future for SealedAccountService {
                                 let account_info = AccountInfo {
                                     account_pkey: self.account_pkey,
                                     network_pkey: self.network_pkey,
+                                    epoch: 0,
+                                    offset: 0,
                                 };
                                 AccountResponse::AccountInfo(account_info)
                             }
@@ -1540,6 +1557,10 @@ struct AccountHandle {
     account_pkey: scc::PublicKey,
     /// Account API.
     account: Account,
+    /// Current epoch.
+    epoch: u64,
+    /// Current offset.
+    offset: u32,
     /// Account Notifications.
     account_notifications: mpsc::UnboundedReceiver<AccountNotification>,
 }
@@ -1667,6 +1688,8 @@ impl WalletService {
         let handle = AccountHandle {
             account_pkey,
             account,
+            epoch: 0,
+            offset: 0,
             account_notifications,
         };
         let prev = self.accounts.insert(account_id.to_string(), handle);
@@ -1716,12 +1739,14 @@ impl WalletService {
                 let accounts = self
                     .accounts
                     .iter()
-                    .map(|(account_id, AccountHandle { account_pkey, .. })| {
+                    .map(|(account_id, handle)| {
                         (
                             account_id.clone(),
                             AccountInfo {
-                                account_pkey: account_pkey.clone(),
+                                account_pkey: handle.account_pkey.clone(),
                                 network_pkey: self.network_pkey.clone(),
+                                epoch: handle.epoch,
+                                offset: handle.offset,
                             },
                         )
                     })
@@ -1906,6 +1931,11 @@ impl Future for WalletService {
             loop {
                 match handle.account_notifications.poll().unwrap() {
                     Async::Ready(Some(notification)) => {
+                        if let AccountNotification::StatusChanged(status_info) = &notification {
+                            handle.epoch = status_info.epoch;
+                            handle.offset = status_info.offset;
+                            continue;
+                        }
                         let notification = WalletNotification {
                             account_id: account_id.clone(),
                             notification,
