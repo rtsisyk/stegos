@@ -2049,6 +2049,7 @@ impl WalletService {
 
             // Save the last finalized epoch to skip recovery for the new fresh account.
             assert_eq!(epoch, 0, "account is not recovered");
+            info!("Set account epoch to = {}", self.last_epoch);
             database.finalize_epoch(self.last_epoch)?;
             drop(database);
         }
