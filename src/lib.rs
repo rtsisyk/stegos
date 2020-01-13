@@ -24,18 +24,45 @@ use jni::objects::{JClass, JString};
 use jni::sys::jint;
 use jni::JNIEnv;
 use log::*;
+use log4rs::append::console::ConsoleAppender;
+use log4rs::config::{Appender, Config as LogConfig, Logger, Root};
+use log4rs::encode::pattern::PatternEncoder;
+use log4rs::Handle as LogHandle;
 use std::fs;
 use std::path::PathBuf;
 use stegos_api::{ApiToken, WebSocketServer};
-use stegos_blockchain::{
-    chain_to_prefix, initialize_chain, Blockchain, ConsistencyCheck, Timestamp,
-};
+use stegos_blockchain::{chain_to_prefix, initialize_chain};
 use stegos_crypto::hash::Hash;
 use stegos_keychain::keyfile::load_network_keys;
-use stegos_network::Libp2pNetwork;
-use stegos_node::{NodeConfig, NodeService};
+use stegos_network::{Libp2pNetwork, NetworkConfig};
+use stegos_node::NodeConfig;
 use stegos_wallet::WalletService;
 use tokio::runtime::Runtime;
+
+fn load_logger_configuration() -> LogHandle {
+    let pattern = "{d(%Y-%m-%d %H:%M:%S)(local)} {h({l})} [{t}] {m}{n}";
+    let console = ConsoleAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(pattern)))
+        .build();
+    let config = LogConfig::builder()
+        .appender(Appender::builder().build("console", Box::new(console)))
+        .logger(Logger::builder().build("stegos", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegosd", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_api", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_blockchain", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_crypto", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_consensus", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_keychain", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_node", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_node::replication", log::LevelFilter::Debug))
+        .logger(Logger::builder().build("stegos_network", log::LevelFilter::Info))
+        .logger(Logger::builder().build("stegos_wallet", log::LevelFilter::Debug))
+        .logger(Logger::builder().build("trust-dns-resolver", log::LevelFilter::Trace))
+        .build(Root::builder().appender("console").build(LevelFilter::Warn))
+        .expect("Failed to initialize logger");
+
+    log4rs::init_config(config).expect("Failed to initialize logger")
+}
 
 fn init(
     chain_name: String,
@@ -81,52 +108,33 @@ fn init(
     let (network_skey, network_pkey) = load_network_keys(&network_skey_file, &network_pkey_file)?;
 
     // Initialize network
+    let mut network_config = NetworkConfig::default();
+    if chain_name != "dev" {
+        network_config.seed_pool = format!("_stegos._tcp.{}.stegos.com", chain_name).to_string();
+    }
     let mut rt = Runtime::new()?;
-    let (network, network_service, peer_id, replication_rx) = Libp2pNetwork::new(
-        Default::default(),
-        network_skey.clone(),
-        network_pkey.clone(),
-    )?;
-
-    // Initialize blockchain
-    let (genesis, chain_cfg) = initialize_chain(&chain_name)?;
-    let genesis_hash = Hash::digest(&genesis);
-    info!("Using '{}' chain, genesis={}", chain_name, genesis_hash);
-    let timestamp = Timestamp::now();
-    let chain = Blockchain::new(
-        chain_cfg.clone(),
-        &chain_dir,
-        ConsistencyCheck::None,
-        genesis,
-        timestamp,
-    )?;
-
-    let epoch = chain.epoch();
-    // Initialize node
-    let node_cfg: NodeConfig = Default::default();
-    let (mut node_service, node) = NodeService::new(
-        node_cfg.clone(),
-        chain,
-        network_skey.clone(),
-        network_pkey.clone(),
-        network.clone(),
-        chain_name.clone(),
-        peer_id,
-        replication_rx,
-    )?;
+    let (network, network_service, peer_id, replication_rx) =
+        Libp2pNetwork::new(network_config, network_skey.clone(), network_pkey.clone())?;
 
     // Initialize Wallet.
+    let (genesis, chain_cfg) = initialize_chain(&chain_name)?;
+    info!(
+        "Using '{}' chain, genesis={}",
+        chain_name,
+        Hash::digest(&genesis)
+    );
+    let node_cfg = NodeConfig::default();
     let (wallet_service, wallet) = WalletService::new(
         &accounts_dir,
         network_skey,
         network_pkey,
         network.clone(),
-        node.clone(),
+        peer_id,
+        replication_rx,
         rt.executor(),
-        genesis_hash,
+        Hash::digest(&genesis),
         chain_cfg,
         node_cfg.max_inputs_in_tx,
-        epoch,
     )?;
     rt.spawn(wallet_service);
 
@@ -137,14 +145,11 @@ fn init(
         api_token,
         rt.executor(),
         network.clone(),
-        wallet.clone(),
-        node.clone(),
+        Some(wallet.clone()),
+        None,
         version,
         chain_name,
     )?;
-
-    node_service.init().expect("shit happens");
-    rt.spawn(node_service);
 
     // Start main event loop
     rt.block_on(network_service)
@@ -163,7 +168,7 @@ pub extern "system" fn Java_Stegos_init(
     api_token: JString,
     api_endpoint: JString,
 ) -> jint {
-    simple_logger::init_with_level(log::Level::Debug).unwrap_or_default();
+    let _log = load_logger_configuration();
 
     let chain: String = env.get_string(chain).unwrap().into();
     let data_dir: String = env.get_string(data_dir).unwrap().into();

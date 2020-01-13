@@ -27,10 +27,11 @@ use std::collections::BTreeMap;
 pub use stegos_blockchain::PaymentPayloadData;
 pub use stegos_blockchain::StakeInfo;
 use stegos_blockchain::Timestamp;
+pub use stegos_blockchain::TransactionStatus;
 use stegos_crypto::hash::Hash;
 use stegos_crypto::pbc;
 use stegos_crypto::scc;
-use stegos_node::TransactionStatus;
+pub use stegos_replication::api::*;
 pub type AccountId = String;
 
 #[derive(Eq, PartialEq, Serialize, Deserialize, Clone, Debug)]
@@ -134,6 +135,8 @@ pub struct AccountStatusInfo {
 #[serde(rename_all = "snake_case")]
 pub enum AccountNotification {
     StatusChanged(AccountStatusInfo),
+    Unsealed,
+    Sealed,
     BalanceChanged(AccountBalance),
     SnowballStatus(SnowballStatus),
     TransactionStatus {
@@ -241,6 +244,7 @@ pub enum WalletControlRequest {
     DeleteAccount {
         account_id: AccountId,
     },
+    LightReplicationInfo {},
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +324,7 @@ pub enum WalletControlResponse {
     AccountDeleted {
         account_id: AccountId,
     },
+    LightReplicationInfo(ReplicationInfo),
     Error {
         error: String,
     },

@@ -33,11 +33,11 @@ use std::mem;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use stegos_blockchain::mvcc::MultiVersionedMap;
+use stegos_blockchain::TransactionStatus;
 use stegos_blockchain::*;
 use stegos_crypto::hash::{Hash, Hashable, Hasher};
 use stegos_crypto::pbc;
 use stegos_crypto::scc::{self, Fr};
-use stegos_node::TransactionStatus;
 use stegos_serialization::traits::ProtoConvert;
 use tokio_timer::clock;
 
@@ -328,12 +328,16 @@ impl LightDatabase {
         if let Some(epoch_info) = epoch_info {
             let epoch_info =
                 LightEpochInfo::from_buffer(&epoch_info).expect("LightEpochInfo is valid");
-            self.epoch = epoch_info.header.epoch;
+            self.epoch = epoch_info.header.epoch + 1;
             self.micro_blocks.clear();
             self.last_macro_block_hash = Hash::digest(&epoch_info.header);
             self.last_macro_block_random = epoch_info.header.random.rand;
             self.facilitator_pkey = epoch_info.facilitator;
             self.validators = epoch_info.validators;
+            info!(
+                "Recovered database: epoch={}, last_macro_block={}",
+                self.epoch, self.last_macro_block_hash
+            );
         }
     }
 
@@ -552,12 +556,12 @@ impl LightDatabase {
     pub fn validate_macro_block(
         &mut self,
         header: &MacroBlockHeader,
-        multisig: &pbc::Signature,
-        multisigmap: &BitVec,
+        _multisig: &pbc::Signature,
+        _multisigmap: &BitVec,
         input_hashes: &[Hash],
         output_hashes: &[Hash],
         canaries: &[Canary],
-        validators: &StakersGroup,
+        _validators: &StakersGroup,
     ) -> Result<(), Error> {
         let block_hash = Hash::digest(header);
 
@@ -598,6 +602,8 @@ impl LightDatabase {
         //
         // Validate multi-signature.
         //
+        // TODO: use the new light node protocol
+        /*
         if header.epoch > 0 {
             check_multi_signature(
                 &block_hash,
@@ -608,6 +614,7 @@ impl LightDatabase {
             )
             .map_err(|e| BlockError::InvalidBlockSignature(e, header.epoch, block_hash))?;
         }
+        */
 
         // Check VRF.
         let seed = mix(self.last_macro_block_random.clone(), header.view_change);
@@ -679,6 +686,7 @@ impl LightDatabase {
         //
         // Validate validators.
         //
+        /*
         let validators_len = validators.len();
         if header.validators_len as usize != validators_len {
             panic!(
@@ -693,6 +701,7 @@ impl LightDatabase {
                 validators_range_hash, header.validators_range_hash
             );
         }
+        */
 
         Ok(())
     }
@@ -703,7 +712,7 @@ impl LightDatabase {
     pub fn validate_light_micro_block(
         &mut self,
         header: &MicroBlockHeader,
-        sig: &pbc::Signature,
+        _sig: &pbc::Signature,
         input_hashes: &[Hash],
         output_hashes: &[Hash],
         canaries: &[Canary],
@@ -754,6 +763,8 @@ impl LightDatabase {
 
         // Check signature.
         let last_random = self.last_block_random();
+        // TODO: use the new light node protocol
+        /*
         let leader = election::select_leader(&self.validators, &last_random, header.view_change);
         if leader != header.pkey {
             return Err(BlockError::DifferentPublicKey(leader, header.pkey).into());
@@ -761,6 +772,7 @@ impl LightDatabase {
         if let Err(_e) = pbc::check_hash(&block_hash, sig, &leader) {
             return Err(BlockError::InvalidLeaderSignature(header.epoch, block_hash).into());
         }
+        */
 
         // Check VRF.
         let seed = mix(last_random.clone(), header.view_change);
@@ -885,8 +897,9 @@ impl LightDatabase {
             transaction_statuses.insert(tx_hash, tx_status);
         }
 
-        let facilitator = election::select_facilitator(&header.random.rand, &validators);
-        self.facilitator_pkey = facilitator;
+        // TODO: use the new light node protocol
+        // let facilitator = election::select_facilitator(&header.random.rand, &validators);
+        // self.facilitator_pkey = facilitator;
         self.epoch += 1;
         self.micro_blocks.clear();
         self.last_macro_block_hash = block_hash;
@@ -903,7 +916,6 @@ impl LightDatabase {
             facilitator: self.facilitator_pkey.clone(),
         };
         batch.put_cf(meta_cf, EPOCH_KEY, epoch_info.into_buffer()?)?;
-
         for (tx_hash, tx_status) in &transaction_statuses {
             let timestamp = self
                 .tx_entry(tx_hash.clone())
