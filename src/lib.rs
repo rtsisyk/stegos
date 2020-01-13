@@ -110,7 +110,7 @@ fn init(
         network_skey.clone(),
         network_pkey.clone(),
         network.clone(),
-        chain_name,
+        chain_name.clone(),
         peer_id,
         replication_rx,
     )?;
@@ -140,6 +140,7 @@ fn init(
         wallet.clone(),
         node.clone(),
         version,
+        chain_name,
     )?;
 
     node_service.init().expect("shit happens");
